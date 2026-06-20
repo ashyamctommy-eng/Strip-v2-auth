@@ -1,8 +1,7 @@
 [build]
-  builder = "nixpacks"
+  builder = "RAILPACK"
   buildCommand = "pip install -r requirements.txt"
 
 [deploy]
   startCommand = "python bot.py"
-  healthcheckPath = "/"
-  restartPolicyType = "on-failure"
+  restartPolicyType = "ON_FAILURE"
