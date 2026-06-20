@@ -15,7 +15,6 @@ import tempfile
 import random
 import importlib.util
 import aiohttp
-from aiohttp import web
 from datetime import datetime
 
 from telegram import Update
@@ -271,6 +270,16 @@ async def cmd_gen(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await msg.edit_text(text, parse_mode="Markdown")
 
+    # Send .txt file with all generated cards
+    import io as io_module
+    file_bytes = "\n".join(generated).encode("utf-8")
+    await update.message.reply_document(
+        document=io_module.BytesIO(file_bytes),
+        filename=f"generated_{bin_prefix}_{count}.txt",
+        caption=f"✅ **{count}** cards — BIN `{bin_prefix}` {CREDIT}",
+        parse_mode="Markdown",
+    )
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # /bin [card or BIN]  —  lookup BIN details
@@ -317,44 +326,44 @@ async def cmd_bin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     return
                 data = await resp.json()
 
-        # Format the response
+        # Format the response — plain text to avoid Markdown parsing errors
         scheme = data.get("scheme", "N/A") or "N/A"
         brand = data.get("brand", "N/A") or "N/A"
         type_ = data.get("type", "N/A") or "N/A"
-        prepaid = "**Yes**" if data.get("prepaid") else "No"
+        prepaid = "Yes" if data.get("prepaid") else "No"
         country_name = (data.get("country") or {}).get("name", "N/A") or "N/A"
         country_code = (data.get("country") or {}).get("alpha2", "") or ""
         bank_name = (data.get("bank") or {}).get("name", "N/A") or "N/A"
         bank_url = (data.get("bank") or {}).get("url", "") or ""
         bank_phone = (data.get("bank") or {}).get("phone", "") or ""
 
-        country_line = f"**🌍** Country: **{country_name}**"
+        country_line = f"Country: {country_name}"
         if country_code:
-            country_line += f" (`{country_code}`)"
+            country_line += f" ({country_code})"
 
-        parts = [
-            f"**🏦 BIN Lookup** `{bin_num}`",
+        lines = [
+            f"🏦 BIN Lookup: {bin_num}",
             "",
-            f"**💳** Scheme: **{scheme}**",
-            f"**🏷️** Brand: **{brand}**",
-            f"**📂** Type: **{type_}**",
-            f"**💵** Prepaid: {prepaid}",
-            country_line,
-            f"**🏛️** Bank: **{bank_name}**",
+            f"💳 Scheme: {scheme}",
+            f"🏷️ Brand: {brand}",
+            f"📂 Type: {type_}",
+            f"💵 Prepaid: {prepaid}",
+            f"🌍 {country_line}",
+            f"🏛️ Bank: {bank_name}",
         ]
         if bank_url:
-            parts.append(f"**🌐** URL: {bank_url}")
+            lines.append(f"🌐 URL: {bank_url}")
         if bank_phone:
-            parts.append(f"**📞** Phone: `{bank_phone}`")
+            lines.append(f"📞 Phone: {bank_phone}")
 
         if not data.get("bank"):
-            parts.append("")
-            parts.append("⚠️ No bank details available for this BIN.")
+            lines.append("")
+            lines.append("⚠️ No bank details available for this BIN.")
 
-        parts.append("")
-        parts.append(f"━━━━━━━━━━━━━━━━\n{CREDIT}")
+        lines.append("")
+        lines.append(f"━━━━━━━━━━━━━━━━\n{CREDIT}")
 
-        await msg.edit_text("\n".join(parts), parse_mode="Markdown")
+        await msg.edit_text("\n".join(lines))
 
     except asyncio.TimeoutError:
         await msg.edit_text(
@@ -540,8 +549,9 @@ async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         s["cards"].extend(cards_to_check)
 
     msg = await update.message.reply_text(
-        f"**⚡ Checking** {len(cards_to_check)} card{'s' if len(cards_to_check) != 1 else ''}\n"
-        f"**🌐** {len(s['proxies'])} proxy{'ies' if len(s['proxies']) != 1 else ''} available\n"
+        f"**⚡ Starting check...**\n"
+        f"**📋** Cards: **{len(cards_to_check)}**\n"
+        f"**🌐** Proxies: **{len(s['proxies'])}**\n"
         f"**⚙️** Concurrency: **{concurrency}**",
         parse_mode="Markdown",
     )
@@ -554,7 +564,29 @@ async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         proxies = s["proxies"] if s["proxies"] else []
-        results = await checker.mass_check(tmp_path, proxies=proxies, concurrency=concurrency)
+
+        # ── Run mass_check with live progress updates ──────────────────
+        total = len(cards_to_check)
+        check_task = asyncio.create_task(
+            checker.mass_check(tmp_path, proxies=proxies, concurrency=concurrency)
+        )
+
+        dots = 0
+        while not check_task.done():
+            await asyncio.sleep(2.5)
+            dots = (dots + 1) % 4
+            try:
+                await msg.edit_text(
+                    f"**⚡ Processing**{'·' * dots}{' ' * (3 - dots)}\n"
+                    f"**📋** Cards: **{total}**\n"
+                    f"**🌐** Proxies: **{len(proxies)}**\n"
+                    f"**⏳** Working...",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass  # Skip failed edits to avoid spam
+
+        results = await check_task
         s["results"] = results
 
         approved = [r for r in results if r.get("is_live")]
@@ -746,6 +778,7 @@ def start_health_server():
     health_app = web.Application()
     health_app.router.add_get("/{tail:.*}", health)
     return health_app
+
 async def async_main() -> None:
     """Async entrypoint — starts health server first, then bot."""
     bot_app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
@@ -776,6 +809,7 @@ async def async_main() -> None:
             port=PORT,
             url_path=BOT_TOKEN,
         )
+        # PTB webhook handles health checks on GET /
         await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
     else:
         # Start health server BEFORE any blocking calls
@@ -801,7 +835,6 @@ async def async_main() -> None:
         await bot_app.stop()
         if not WEBHOOK_URL:
             await runner.cleanup()
-
 
 def main() -> None:
     asyncio.run(async_main())
