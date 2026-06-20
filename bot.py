@@ -745,9 +745,8 @@ def start_health_server():
     health_app = web.Application()
     health_app.router.add_get("/{tail:.*}", health)
     return health_app
-
 async def async_main() -> None:
-    """Async entrypoint — starts health server + bot together."""
+    """Async entrypoint — starts health server first, then bot."""
     bot_app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     bot_app.add_handler(CommandHandler("start", cmd_start))
@@ -766,15 +765,9 @@ async def async_main() -> None:
     bot_app.add_handler(MessageHandler(filters.Document.TEXT, handle_document))
     bot_app.add_error_handler(error_handler)
 
-    # Always clear any stale webhook first (from previous deploys)
-    await bot_app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🧹 Cleared any stale webhook from previous deployments")
-
+    # ── Start HTTP server IMMEDIATELY so Railway health check passes ───
     if WEBHOOK_URL:
-        # ── Webhook mode ───────────────────────────────────────────────
-        # PTB's webhook server handles BOTH Telegram updates + health checks
         logger.info(f"✅ Webhook mode → {WEBHOOK_URL}")
-        await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
         await bot_app.initialize()
         await bot_app.start()
         await bot_app.updater.start_webhook(
@@ -782,10 +775,9 @@ async def async_main() -> None:
             port=PORT,
             url_path=BOT_TOKEN,
         )
-        # No extra health server — PTB responds 200 to GET / and anything else
+        await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
     else:
-        # ── Polling mode ───────────────────────────────────────────────
-        # Health server on PORT keeps Railway happy; bot polls Telegram
+        # Start health server BEFORE any blocking calls
         health_app = start_health_server()
         runner = web.AppRunner(health_app)
         await runner.setup()
@@ -797,6 +789,10 @@ async def async_main() -> None:
         await bot_app.start()
         await bot_app.updater.start_polling()
 
+    # ── Now safe to make Telegram API calls ────────────────────────────
+    await bot_app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("🧹 Cleared any stale webhook from previous deployments")
+
     # Keep alive
     try:
         await asyncio.Event().wait()
@@ -804,6 +800,7 @@ async def async_main() -> None:
         await bot_app.stop()
         if not WEBHOOK_URL:
             await runner.cleanup()
+
 
 def main() -> None:
     asyncio.run(async_main())
