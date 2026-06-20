@@ -653,6 +653,80 @@ async def cmd_results(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# /check_balance <card>  —  check card balance & details
+#   Usage: /check_balance 4242424242424242|12|2026|123
+# ────────────────────────────────────────────────────────────────────────────
+async def cmd_check_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args:
+        await update.message.reply_text(
+            "**❌** Usage: **`/check_balance cc|mm|yy|cvv`**\n"
+            "Example: `/check_balance 5410583577670217|06|2027|446`",
+            parse_mode="Markdown",
+        )
+        return
+
+    raw = " ".join(ctx.args).strip()
+    parts = raw.replace("|", " ").split()
+    if len(parts) != 4:
+        # Try raw format with pipes
+        parts2 = raw.split("|")
+        if len(parts2) == 4:
+            parts = parts2
+        else:
+            await update.message.reply_text(
+                "**❌** Invalid format. Use: **`cc|mm|yy|cvv`**",
+                parse_mode="Markdown",
+            )
+            return
+
+    cc, mes, ano, cvv = parts
+    card_data = {"number": cc, "exp_month": mes, "exp_year": ano, "cvc": cvv}
+
+    msg = await update.message.reply_text(
+        f"**🔍 Checking balance for** `{cc[:6]}******{cc[-4:]}`...",
+        parse_mode="Markdown",
+    )
+
+    try:
+        result = await checker.check_card_balance(card_data, proxy_url=None)
+    except Exception as e:
+        await msg.edit_text(f"**❌ Error:** `{e}`", parse_mode="Markdown")
+        return
+
+    if not result.get("success"):
+        info = result.get("card_info", {})
+        await msg.edit_text(
+            f"**❌ Balance Check Failed**\n\n"
+            f"**💳** {info.get('brand', '?')} • **{info.get('funding', '?')}**\n"
+            f"**🔢** `{cc[:6]}******{cc[-4:]}`\n\n"
+            f"**⚠️** {result.get('error', 'Unknown error')}",
+            parse_mode="Markdown",
+        )
+        return
+
+    info = result.get("card_info", {})
+    card_display = f"`{cc[:6]}******{cc[-4:]}`"
+    balance = result.get("balance", "Unknown")
+    auth = result.get("auth_response", "N/A")
+
+    lines = [
+        f"**💳 Card Info**\n",
+        f"**🏷️ Brand:** {info.get('brand', '?')}",
+        f"**📂 Type:** {info.get('funding', '?')}",
+        f"**🌍 Country:** {info.get('country', '??')}",
+        f"**🔢 Card:** {card_display}",
+        f"**📅 Exp:** {info.get('exp_month', '??')}/{info.get('exp_year', '????')}",
+        f"",
+        f"**💰 Balance:** {balance}",
+        f"**📌 Auth:** {auth}",
+        f"",
+        f"━━━━━━━━━━━━━━━━\n{CREDIT}",
+    ]
+
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # /status
 # ────────────────────────────────────────────────────────────────────────────
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -802,6 +876,7 @@ async def async_main() -> None:
     bot_app.add_handler(CommandHandler("addcards", cmd_addcards))
     bot_app.add_handler(CommandHandler("check", cmd_check))
     bot_app.add_handler(CommandHandler("results", cmd_results))
+    bot_app.add_handler(CommandHandler("check_balance", cmd_check_balance))
     bot_app.add_handler(CommandHandler("status", cmd_status))
     bot_app.add_handler(CommandHandler("stats", cmd_stats))
     bot_app.add_handler(CommandHandler("saved", cmd_saved))
