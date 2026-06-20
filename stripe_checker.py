@@ -93,7 +93,7 @@ async def process_stripe_card(card_data, proxy_url=None):
     try:
         if not site_url.startswith('http'):
             site_url = 'https://' + site_url
-        timeout = aiohttp.ClientTimeout(total=70)
+        timeout = aiohttp.ClientTimeout(total=90)
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             from urllib.parse import urlparse
@@ -301,8 +301,23 @@ async def mass_check(file_path, proxies=None, concurrency=10, progress_callback=
                 result = {'cc': cc_line, 'status': f'{Fore.RED}❌ Invalid', 'response': 'Invalid format', 'is_live': False}
             else:
                 cc, mes, ano, cvv = parts
-                proxy = random.choice(proxies) if proxies else None
-                result = await check_card(cc, mes, ano, cvv, proxy=proxy)
+                # Try up to 3 proxies if the first one fails with system error
+                max_proxy_retries = 3 if proxies else 1
+                used_proxies = set()
+                result = None
+                for attempt in range(max_proxy_retries):
+                    available = [p for p in proxies if p not in used_proxies] if proxies else []
+                    proxy = random.choice(available) if available else (random.choice(proxies) if proxies else None)
+                    if proxy:
+                        used_proxies.add(proxy)
+                    result = await check_card(cc, mes, ano, cvv, proxy=proxy)
+                    resp = result.get('response', '') or ''
+                    # System/connection errors → retry with different proxy
+                    if 'System Error' in resp and attempt < max_proxy_retries - 1:
+                        print(f"{Fore.YELLOW}🔄 Retry {attempt+1}/{max_proxy_retries} for {cc}...{Style.RESET_ALL}")
+                        await asyncio.sleep(1)
+                        continue
+                    break  # Non-system error or last attempt
             results[index] = result
             completed += 1
             print(f"{Fore.CYAN}[{completed}/{len(cc_lines)}] {result['cc']} → {result['status']}{Style.RESET_ALL} | Response: {result['response']}")
