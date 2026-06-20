@@ -905,13 +905,17 @@ async def async_main() -> None:
         await site.start()
         logger.info(f"✅ Health check server listening on 0.0.0.0:{PORT}")
 
+        # Kill any stale webhook/polling BEFORE connecting
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("🧹 Cleared stale webhook / pending updates")
+        await asyncio.sleep(0.5)
+
         await bot_app.initialize()
         await bot_app.start()
-        await bot_app.updater.start_polling()
+        await bot_app.updater.start_polling(drop_pending_updates=True)
 
     # ── Now safe to make Telegram API calls ────────────────────────────
-    await bot_app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🧹 Cleared any stale webhook from previous deployments")
+    logger.info("✅ Bot polling started")
 
     # Keep alive
     try:
