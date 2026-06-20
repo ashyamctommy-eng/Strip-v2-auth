@@ -15,7 +15,6 @@ import tempfile
 import random
 import importlib.util
 import aiohttp
-from aiohttp import web
 from datetime import datetime
 
 from telegram import Update
@@ -255,15 +254,15 @@ async def cmd_gen(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for _ in range(count):
         generated.append(generate_card_line(bin_prefix))
 
-    # Load into session
-    s["cards"].extend(generated)
+    # Build .txt file content
+    txt_content = "\n".join(generated)
+    file_bytes = txt_content.encode("utf-8")
 
     # Show first 10 as preview
     preview = "\n".join(f"`{g}`" for g in generated[:10])
     text = (
         f"**✅ {count}** cards generated with BIN **{bin_prefix}**\n"
-        f"**📊** Total cards in session: **{len(s['cards'])}**\n"
-        f"**➡️** Reply **`/check`** to run.\n\n"
+        f"**📄** File sent below — upload it or paste to check.\n\n"
         f"**Preview (first 10):**\n{preview}"
     )
     if count > 10:
@@ -272,13 +271,10 @@ async def cmd_gen(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await msg.edit_text(text, parse_mode="Markdown")
 
     # Send .txt file with all generated cards
-    import io as io_module
-    file_bytes = "\n".join(generated).encode("utf-8")
     await update.message.reply_document(
-        document=io_module.BytesIO(file_bytes),
+        document=io.BytesIO(file_bytes),
         filename=f"generated_{bin_prefix}_{count}.txt",
-        caption=f"✅ **{count}** cards — BIN `{bin_prefix}` {CREDIT}",
-        parse_mode="Markdown",
+        caption=f"✅ **{count}** cards — BIN `{bin_prefix}`",
     )
 
 
